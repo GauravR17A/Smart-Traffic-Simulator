@@ -5,17 +5,17 @@ from enum import Enum
 from collections import deque
 import json
 import os
+import sys
 
 # Initialize Pygame
 pygame.init()
 
 # ===================== Configuration =====================
 class Config:
-    # Display settings
+    # Display
     WINDOW_WIDTH = 1200
     WINDOW_HEIGHT = 800
-    FPS = 60
-    FRAME_TIME = 1.0 / FPS  # base frame seconds
+    FPS = 60  # render FPS
 
     # Colors
     ROAD_COLOR = (60, 60, 60)
@@ -31,42 +31,40 @@ class Config:
     SIGNAL_OFF = (50, 50, 50)
 
     # UI colors
-    UI_BG = (0, 0, 0, 180)
     TEXT_COLOR = (255, 255, 255)
     BUTTON_COLOR = (70, 70, 70)
     BUTTON_HOVER = (100, 100, 100)
 
-    # Road dimensions
+    # Road geometry
     ROAD_WIDTH = 200
     LANE_WIDTH = 40
     INTERSECTION_SIZE = 200
 
-    # Car kinematics (interpreted as "per-frame" at base FPS and scaled by dt_sim*FPS)
+    # Vehicle dynamics (baseline @ 60 FPS; scaled by dt_sim*FPS)
     CAR_WIDTH = 30
     CAR_HEIGHT = 15
-    CAR_MAX_SPEED = 4.0         # px/frame @ 60 FPS baseline
-    CAR_ACCELERATION = 0.10     # px/frame^2 baseline
+    CAR_MAX_SPEED = 4.0       # px/frame baseline
+    CAR_ACCELERATION = 0.10   # px/frame^2 baseline
     SAFE_DISTANCE = 35
 
-    # Spawn settings
-    BASE_SPAWN_RATE = 0.02      # (legacy) per frame baseline
+    # Spawn settings (legacy per-frame converted to per-second internally)
+    BASE_SPAWN_RATE = 0.02
     MAIN_ROAD_MULTIPLIER = 1.5
     SIDE_ROAD_MULTIPLIER = 1.0
-    # We convert to per-second rates internally: rate_per_sec = BASE_SPAWN_RATE * FPS * multiplier
 
     # Signal timing (seconds)
     FIXED_GREEN_TIME = 20
     FIXED_YELLOW_TIME = 3
     FIXED_ALL_RED_TIME = 2
 
-    # AI Controller settings
+    # AI Controller
     AI_UPDATE_INTERVAL = 2.0  # seconds
     MIN_GREEN_TIME = 12
     MAX_GREEN_TIME = 50
     COOLDOWN_TIME = 6
     ANTI_STARVATION_TIME = 120
     PRESSURE_ALPHA = 0.3  # arrival rate weight
-    PRESSURE_BETA = 0.4   # wait time weight
+    PRESSURE_BETA  = 0.4  # wait time weight
     HYSTERESIS_MARGIN = 0.5
 
 class SignalState(Enum):
@@ -84,8 +82,8 @@ class Direction(Enum):
 # ===================== Car =====================
 class Car:
     def __init__(self, x, y, direction, is_ambulance=False, spawn_sim_time=0.0):
-        self.x = x
-        self.y = y
+        self.x = float(x)
+        self.y = float(y)
         self.direction = direction
         self.speed = 0.0
         self.max_speed = Config.CAR_MAX_SPEED
@@ -99,18 +97,17 @@ class Car:
         self.exit_time = None
 
     def update(self, cars, signal_controller, dt_sim):
-        # scale factor so legacy per-frame params remain consistent under variable dt
+        # Keep per-frame tuned params consistent under variable dt
         step_scale = dt_sim * Config.FPS
 
         old_x, old_y = self.x, self.y
 
-        # Should we stop?
+        # Signal compliance (ambulances preempt)
         should_stop = self.should_stop_at_signal(signal_controller)
-        # Ambulances never stop at red (demo-friendly preemption)
         if self.is_ambulance:
             should_stop = False
 
-        # Car ahead?
+        # Car-following
         car_ahead = self.get_car_ahead(cars)
 
         if should_stop or car_ahead:
@@ -120,7 +117,7 @@ class Car:
             self.speed = min(self.max_speed, self.speed + Config.CAR_ACCELERATION * step_scale)
             self.is_stopped = False
 
-        # Move
+        # Integrate position
         delta = self.speed * step_scale
         if self.direction == Direction.NORTH:
             self.y -= delta
@@ -131,7 +128,7 @@ class Car:
         elif self.direction == Direction.WEST:
             self.x -= delta
 
-        # Waiting time (sim-time based)
+        # Waiting time (sim-time)
         if self.is_stopped and (abs(self.x - old_x) < 1e-3 and abs(self.y - old_y) < 1e-3):
             self.waiting_time += dt_sim
 
@@ -139,29 +136,20 @@ class Car:
         cx = Config.WINDOW_WIDTH // 2
         cy = Config.WINDOW_HEIGHT // 2
         half = Config.INTERSECTION_SIZE // 2
-        stop_band = 50  # distance window around the stop line
-
-        # Correct stop lines:
-        # Northbound approaches the southern stop line at y = cy + half
-        # Southbound approaches the northern stop line at y = cy - half
-        # Eastbound approaches the western stop line at x = cx - half
-        # Westbound approaches the eastern stop line at x = cx + half
+        stop_band = 50  # window around stop line
 
         if self.direction == Direction.NORTH:
             stop_y = cy + half
             if (stop_y - stop_band) < self.y < (stop_y + stop_band):
                 return signal_controller.get_signal_state('main') != SignalState.GREEN
-
         elif self.direction == Direction.SOUTH:
             stop_y = cy - half
             if (stop_y - stop_band) < self.y < (stop_y + stop_band):
                 return signal_controller.get_signal_state('main') != SignalState.GREEN
-
         elif self.direction == Direction.EAST:
             stop_x = cx - half
             if (stop_x - stop_band) < self.x < (stop_x + stop_band):
                 return signal_controller.get_signal_state('side') != SignalState.GREEN
-
         elif self.direction == Direction.WEST:
             stop_x = cx + half
             if (stop_x - stop_band) < self.x < (stop_x + stop_band):
@@ -194,12 +182,12 @@ class Car:
 
     def draw(self, screen):
         rect = pygame.Rect(
-            self.x - self.width // 2,
-            self.y - self.height // 2,
+            int(self.x) - self.width // 2,
+            int(self.y) - self.height // 2,
             self.width,
             self.height
         )
-        if self.direction in [Direction.NORTH, Direction.SOUTH]:
+        if self.direction in (Direction.NORTH, Direction.SOUTH):
             rect.width, rect.height = self.height, self.width
 
         pygame.draw.rect(screen, self.color, rect)
@@ -207,8 +195,8 @@ class Car:
 
         if self.is_ambulance:
             s = 8
-            pygame.draw.line(screen, Config.RED, (self.x - s//2, self.y), (self.x + s//2, self.y), 3)
-            pygame.draw.line(screen, Config.RED, (self.x, self.y - s//2), (self.x, self.y + s//2), 3)
+            pygame.draw.line(screen, Config.RED, (int(self.x - s//2), int(self.y)), (int(self.x + s//2), int(self.y)), 3)
+            pygame.draw.line(screen, Config.RED, (int(self.x), int(self.y - s//2)), (int(self.x), int(self.y + s//2)), 3)
 
     def is_off_screen(self):
         m = 100
@@ -222,13 +210,13 @@ class SignalController:
         self.main_signal = SignalState.GREEN
         self.side_signal = SignalState.RED
 
-        # Timers run in sim-time
+        # Sim-time clocks
         self.signal_timer = 0.0
         self.current_green_time = 0.0
         self.last_ai_update = start_sim_time
         self.last_switch_time = start_sim_time - Config.COOLDOWN_TIME
 
-        # Last green timestamps (sim-time)
+        # Last green timestamps
         self.main_last_green = start_sim_time
         self.side_last_green = start_sim_time
 
@@ -237,7 +225,7 @@ class SignalController:
         self.switch_stage = 0
         self.switch_start_time = start_sim_time
 
-        # Metrics
+        # Arrival history (sim-time)
         self.arrival_history = {'main': deque(maxlen=200), 'side': deque(maxlen=200)}
 
     def update(self, cars, dt_sim, sim_time):
@@ -305,7 +293,6 @@ class SignalController:
 
         if (self.current_green_time >= Config.MIN_GREEN_TIME and
             time_since_switch >= Config.COOLDOWN_TIME):
-
             if waiting_p > (active_p + Config.HYSTERESIS_MARGIN):
                 should_switch = True
 
@@ -319,11 +306,8 @@ class SignalController:
         q = self.get_queue_length(cars, road)
         arr_rate = self.get_arrival_rate(road, sim_time)   # per second
         avg_wait = self.get_average_wait_time(cars, road)  # seconds
-
         avg_wait_norm = min(avg_wait / 60.0, 1.0)
-        # Lightly scaled to keep magnitudes similar to queue length
-        pressure = q + (Config.PRESSURE_ALPHA * arr_rate * 10.0) + (Config.PRESSURE_BETA * avg_wait_norm * 10.0)
-        return pressure
+        return q + (Config.PRESSURE_ALPHA * arr_rate * 10.0) + (Config.PRESSURE_BETA * avg_wait_norm * 10.0)
 
     def get_queue_length(self, cars, road):
         cx = Config.WINDOW_WIDTH // 2
@@ -365,13 +349,11 @@ class SignalController:
         self.switch_stage = 0
         self.switch_start_time = sim_time
         self.last_switch_time = sim_time
-
         # record who had green last
         if self.main_signal == SignalState.GREEN:
             self.main_last_green = sim_time
         elif self.side_signal == SignalState.GREEN:
             self.side_last_green = sim_time
-
         self.current_green_time = 0.0
 
     def handle_signal_switching(self, sim_time):
@@ -382,7 +364,6 @@ class SignalController:
                 self.main_signal = SignalState.YELLOW
             elif self.side_signal == SignalState.GREEN:
                 self.side_signal = SignalState.YELLOW
-
             if elapsed >= Config.FIXED_YELLOW_TIME:
                 self.switch_stage = 1
                 self.switch_start_time = sim_time
@@ -395,7 +376,6 @@ class SignalController:
                 self.switch_start_time = sim_time
 
         elif self.switch_stage == 2:  # Grant green to the road that wasn't just green
-            # We know the road that was green just had its "last_green" set to a newer timestamp.
             if self.side_last_green < self.main_last_green:
                 self.side_signal = SignalState.GREEN
                 self.main_signal = SignalState.RED
@@ -489,6 +469,11 @@ class TrafficSimulation:
         self.sim_time = 0.0
         self.dt_sim = 0.0
 
+        # Incident region (visual + slowdown)
+        cx = Config.WINDOW_WIDTH // 2
+        cy = Config.WINDOW_HEIGHT // 2
+        self.incident_rect = pygame.Rect(cx + 20, cy - 60, 40, 30)  # same as drawn
+
     # ---------- Persistence ----------
     def load_cached_metrics(self):
         try:
@@ -538,7 +523,7 @@ class TrafficSimulation:
 
     def quit_game(self):
         pygame.quit()
-        raise SystemExit
+        sys.exit(0)
 
     # ---------- Core ----------
     def spawn_cars(self):
@@ -547,46 +532,51 @@ class TrafficSimulation:
         main_rate = base_per_sec * Config.MAIN_ROAD_MULTIPLIER   # cars/sec
         side_rate = base_per_sec * Config.SIDE_ROAD_MULTIPLIER   # cars/sec
 
-        # Poisson probability for interval dt_sim
         def event(dt, rate_per_sec):
             p = 1.0 - math.exp(-rate_per_sec * dt)
             return random.random() < p
 
-        # Main road spawn
+        # Main road spawn (N/S)
         if event(self.dt_sim, main_rate):
             direction = random.choice([Direction.NORTH, Direction.SOUTH])
             is_ambulance = self.ambulance_mode and (random.random() < 0.10)
             cx = Config.WINDOW_WIDTH // 2
-            cy = Config.WINDOW_HEIGHT
-
             if direction == Direction.NORTH:
-                car = Car(cx - Config.LANE_WIDTH // 2, cy + 50, direction, is_ambulance, self.sim_time)
+                car = Car(cx - Config.LANE_WIDTH // 2, Config.WINDOW_HEIGHT + 50, direction, is_ambulance, self.sim_time)
             else:
                 car = Car(cx + Config.LANE_WIDTH // 2, -50, direction, is_ambulance, self.sim_time)
-
             self.cars.append(car)
             self.metrics.record_car_spawn()
             self.signal_controller.record_arrival('main', self.sim_time)
 
-        # Side road spawn
+        # Side road spawn (E/W)
         if event(self.dt_sim, side_rate):
             direction = random.choice([Direction.EAST, Direction.WEST])
             is_ambulance = self.ambulance_mode and (random.random() < 0.10)
-            cx = Config.WINDOW_WIDTH
             cy = Config.WINDOW_HEIGHT // 2
-
             if direction == Direction.EAST:
                 car = Car(-50, cy - Config.LANE_WIDTH // 2, direction, is_ambulance, self.sim_time)
             else:
                 car = Car(Config.WINDOW_WIDTH + 50, cy + Config.LANE_WIDTH // 2, direction, is_ambulance, self.sim_time)
-
             self.cars.append(car)
             self.metrics.record_car_spawn()
             self.signal_controller.record_arrival('side', self.sim_time)
 
     def update_cars(self):
+        # Light incident effect: cars crossing the incident region slow down (not ambulances)
         for car in self.cars[:]:
+            # Restore base max speed
+            car.max_speed = Config.CAR_MAX_SPEED
+
+            if self.incident_active and not car.is_ambulance:
+                # If the car is near the incident box, reduce its max speed
+                expand = 30  # leniency
+                inc = self.incident_rect.inflate(expand, expand)
+                if inc.collidepoint(int(car.x), int(car.y)):
+                    car.max_speed = min(car.max_speed, 1.5)
+
             car.update(self.cars, self.signal_controller, self.dt_sim)
+
             if car.is_off_screen():
                 self.metrics.record_car_exit(car, self.sim_time)
                 self.cars.remove(car)
@@ -634,7 +624,7 @@ class TrafficSimulation:
         side_rect = pygame.Rect(0, cy - Config.ROAD_WIDTH // 2, Config.WINDOW_WIDTH, Config.ROAD_WIDTH)
         pygame.draw.rect(self.screen, Config.ROAD_COLOR, side_rect)
 
-        # Lanes (skip inside intersection)
+        # Lane dashes (skip intersection)
         dash, gap = 20, 30
         for y in range(0, Config.WINDOW_HEIGHT, dash + gap):
             if not (cy - Config.INTERSECTION_SIZE//2 < y < cy + Config.INTERSECTION_SIZE//2):
@@ -645,8 +635,8 @@ class TrafficSimulation:
 
         # Stop lines
         t = 4
-        # North approach line at y = cy - half
         half = Config.INTERSECTION_SIZE // 2
+        # North approach line at y = cy - half
         pygame.draw.line(self.screen, Config.LANE_COLOR,
                          (cx - Config.ROAD_WIDTH//2, cy - half),
                          (cx, cy - half), t)
@@ -663,11 +653,10 @@ class TrafficSimulation:
                          (cx - half, cy),
                          (cx - half, cy + Config.ROAD_WIDTH//2), t)
 
-        # Incident indicator (visual only)
+        # Incident indicator
         if self.incident_active:
-            rect = pygame.Rect(cx + 20, cy - 60, 40, 30)
-            pygame.draw.rect(self.screen, (255, 165, 0), rect)
-            pygame.draw.rect(self.screen, (255, 0, 0), rect, 3)
+            pygame.draw.rect(self.screen, (255, 165, 0), self.incident_rect)
+            pygame.draw.rect(self.screen, (255, 0, 0), self.incident_rect, 3)
 
     def draw_signals(self):
         cx = Config.WINDOW_WIDTH // 2
@@ -695,9 +684,7 @@ class TrafficSimulation:
         pygame.draw.circle(self.screen, Config.GREEN if state == SignalState.GREEN else Config.SIGNAL_OFF, grn_pos, r)
 
     def draw_ui_overlay(self):
-        overlay = pygame.Surface((400, 300))
-        overlay.set_alpha(200)
-        overlay.fill((0, 0, 0))
+        overlay = pygame.Surface((400, 300)); overlay.set_alpha(200); overlay.fill((0, 0, 0))
         self.screen.blit(overlay, (10, 10))
 
         y = 20
@@ -730,7 +717,6 @@ class TrafficSimulation:
         if (self.signal_controller.controller_type == "ai" and
             self.cached_fixed_metrics and
             self.metrics.total_cars_exited > 10):
-
             fixed_avg = self.cached_fixed_metrics.get('avg_wait_time', 0) or 0
             if fixed_avg > 0:
                 imp = ((fixed_avg - avg_wait) / fixed_avg) * 100.0
@@ -739,17 +725,17 @@ class TrafficSimulation:
 
         # Controls
         y = Config.WINDOW_HEIGHT - 120
-        for line in ["ESC: Menu", "SPACE: Speed (2x)", "I: Incident", "A: Ambulance Mode"]:
+        for line in ["ESC: Menu", "SPACE: Speed (2x)", "I: Incident (slows traffic)", "A: Ambulance Preemption"]:
             self.screen.blit(self.small_font.render(line, True, Config.TEXT_COLOR), (20, y))
             y += 20
 
         # Status flags
         if self.simulation_speed > 1.0:
-            self.screen.blit(self.small_font.render("FAST MODE", True, Config.YELLOW), (Config.WINDOW_WIDTH - 110, 20))
+            self.screen.blit(self.small_font.render("FAST MODE", True, (255, 255, 0)), (Config.WINDOW_WIDTH - 120, 20))
         if self.incident_active:
-            self.screen.blit(self.small_font.render("INCIDENT", True, Config.RED), (Config.WINDOW_WIDTH - 110, 45))
+            self.screen.blit(self.small_font.render("INCIDENT", True, (255, 0, 0)), (Config.WINDOW_WIDTH - 120, 45))
         if self.ambulance_mode:
-            self.screen.blit(self.small_font.render("AMBULANCE", True, Config.AMBULANCE_COLOR), (Config.WINDOW_WIDTH - 110, 70))
+            self.screen.blit(self.small_font.render("AMBULANCE", True, Config.AMBULANCE_COLOR), (Config.WINDOW_WIDTH - 120, 70))
 
     def draw_menu(self):
         self.screen.fill((30, 30, 50))
@@ -769,13 +755,13 @@ class TrafficSimulation:
 
         lines = [
             "Fixed Timer: Traditional signal with preset timing",
-            "AI Controller: Adaptive signal based on traffic conditions",
+            "AI Controller: Adaptive signal based on queues, arrivals, and wait",
             "",
             "Controls:",
             "ESC - Return to menu",
             "SPACE - Toggle 2x speed",
-            "I - Toggle incident simulation",
-            "A - Toggle ambulance priority mode"
+            "I - Toggle incident slowdown",
+            "A - Toggle ambulance preemption"
         ]
         y = 450
         for line in lines:
@@ -820,11 +806,16 @@ class TrafficSimulation:
 def main():
     """
     Traffic Signal Simulation (Fixed vs AI)
+
     Controls:
       ESC   - Menu
       SPACE - 2x speed toggle
-      I     - Incident indicator (visual)
-      A     - Ambulance priority (preemption via non-stop)
+      I     - Incident slowdown (affects cars near the orange box)
+      A     - Ambulance preemption (white cars ignore red)
+
+    Notes:
+      - Timekeeping is sim-time based; metrics remain stable under speed toggles.
+      - Spawns are Poisson per-second; doubling speed ≈ doubles arrivals and throughput.
     """
     TrafficSimulation().run()
 
